@@ -7,24 +7,36 @@ from scipy.interpolate import interpn
 from deepSI.model_augmentation.utils import RK4_step
 
 
+###################################################################################
+####################            SIMULATION FUNCTIONS           ####################
+###################################################################################
+
 # Apply experiment wrapper
-def hidden_apply_experiment(sys, data, x0):
+def hidden_apply_experiment(sys, data, x0, x0_meas=False, dt=None):
     # Todo: What if we have data with non-equidistant time-steps
-    if sys.Ts is None and data.dt is None: raise ValueError('Sample time of data not specified')
+    if sys.Ts is None and data.dt is None and dt is None: raise ValueError('Sample time of data not specified')
+    if dt is None:
+        dt = data.dt
     if type(data) is deepSI.system_data.System_data_list:
         lis = []
         for i in range(len(data)):
-            y, x = hidden_apply_one_experiment(sys,data[i].u,x0, data[i].N_samples, data.dt)
-            lis.append(deepSI.System_data(u=data[i].u, y=y, x=x))
+            if x0_meas:
+                x0 = data[i].y[0]
+            y, x = hidden_apply_one_experiment(sys,data[i].u,x0, data[i].N_samples, dt)
+            lis.append(deepSI.System_data(u=data[i].u, y=y.detach(), x=x.detach()))
         retrn = deepSI.System_data_list(lis)
     else:
-        y, x = hidden_apply_one_experiment(sys, data.u, x0, data.N_samples, data.dt)
-        retrn = deepSI.System_data(u=data.u, y=y, x=x)
+        if x0_meas:
+            x0 = data.y[0]
+        y, x = hidden_apply_one_experiment(sys, data.u, x0, data.N_samples, dt)
+        retrn = deepSI.System_data(u=data.u, y=y.detach(), x=x.detach())
     return retrn
 
 
 def hidden_apply_one_experiment(sys, u, x0, T, dt):
     u = torch.tensor(u,dtype=torch.float) if not torch.is_tensor(u) else u
+    if u.ndim == 1:
+        u = torch.unsqueeze(u, dim=1)
     x0 = torch.tensor(x0, dtype=torch.float) if not torch.is_tensor(x0) else x0
     y = torch.zeros(T, sys.Ny)
     x = torch.zeros(T+1, sys.Nx)
@@ -38,6 +50,10 @@ def hidden_apply_one_experiment(sys, u, x0, T, dt):
             x[k + 1, :] = RK4_step(sys.f, x[k, :], u[k, :], dt)
     return y, x[:-1,:]
 
+
+###################################################################################
+####################               SYSTEM MODELS               ####################
+###################################################################################
 
 class lpv_model_grid:
     def __init__(self, A, B, C, D, grid, Ts=-1):
@@ -177,12 +193,13 @@ class lpv_model_aff:
         raise NotImplementedError('Scheduling function should be implemented in child')
 
 
-class lti_system:
+class lti_system(nn.Module):
     def __init__(self, A, B, C, D, Ts=-1):
-        self.A = A if torch.is_tensor(A) else torch.tensor(A, dtype=torch.float)  # shape: (Nx, Nx)
-        self.B = B if torch.is_tensor(B) else torch.tensor(B, dtype=torch.float)  # shape: (Nx, Nu)
-        self.C = C if torch.is_tensor(C) else torch.tensor(C, dtype=torch.float)  # shape: (Ny, Nx)
-        self.D = D if torch.is_tensor(D) else torch.tensor(D, dtype=torch.float)  # shape: (Ny, Nu)
+        super(lti_system, self).__init__()
+        self.A = A if torch.is_tensor(A) else torch.tensor(A, dtype=torch.float, requires_grad=True)  # shape: (Nx, Nx)
+        self.B = B if torch.is_tensor(B) else torch.tensor(B, dtype=torch.float, requires_grad=True)   # shape: (Nx, Nu)
+        self.C = C if torch.is_tensor(C) else torch.tensor(C, dtype=torch.float, requires_grad=True)   # shape: (Ny, Nx)
+        self.D = D if torch.is_tensor(D) else torch.tensor(D, dtype=torch.float, requires_grad=True)   # shape: (Ny, Nu)
         self.Nx = self.A.shape[0]
         self.Nu = self.B.shape[1]
         self.Ny = self.C.shape[0]
@@ -194,6 +211,7 @@ class lti_system:
         #  - u (Nd, Nu) |
         einsumequation = 'ik, bk->bi' if x.ndim > 1 else 'ik, k->i'
         Ax = torch.einsum(einsumequation, self.A, x) # (Nx, Nx)*(Nd, Nx)->(Nd, Nx)
+        einsumequation = 'ik, bk->bi' if u.ndim > 1 else 'ik, k->i'
         Bu = torch.einsum(einsumequation, self.B, u)   # (Nd, Nx, Nu)*(Nd, Nu)->(Nd, Nx)
         return Ax + Bu
 
@@ -203,13 +221,14 @@ class lti_system:
         #  - u (Nd, Nu) |
         einsumequation = 'ik, bk->bi' if x.ndim > 1 else 'ik, k->i'
         Cx = torch.einsum(einsumequation, self.C, x)  # (Nd, Nx, Nx)*(Nd, Nx)->(Nd, Nx)
+        einsumequation = 'ik, bk->bi' if u.ndim > 1 else 'ik, k->i'
         Du = torch.einsum(einsumequation, self.D, u)  # (Nd, Nx, Nu)*(Nd, Nu)->(Nd, Nx)
         return Cx + Du
 
-    def apply_experiment(self, data, x0=None):
+    def apply_experiment(self, data, x0=None, x0_meas=False):
         if x0 is None:
             x0 = torch.zeros(self.Nx)
-        return hidden_apply_experiment(self, data, x0)
+        return hidden_apply_experiment(self, data, x0, x0_meas)
 
 class lti_affine_system(lti_system):
     def __init__(self, A, B, C, D, f0, h0, Ts=-1):
@@ -261,7 +280,7 @@ class general_nonlinear_system:
         #     u (Nd,Nu)  |
         raise NotImplementedError('Scheduling function should be implemented in child')
 
-    def apply_experiment(self, data, x0=None):
+    def apply_experiment(self, data, dt=None, x0=None, x0_meas=False):
         if x0 is None:
             x0 = torch.zeros(self.Nx)
-        return hidden_apply_experiment(self, data, x0)
+        return hidden_apply_experiment(self, data, x0, x0_meas, dt=dt)

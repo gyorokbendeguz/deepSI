@@ -31,6 +31,7 @@ def verifySystemType(sys):
     if   type(sys).__base__ is model_augmentation.lpvsystem.lpv_model_grid: return
     elif type(sys).__base__ is model_augmentation.lpvsystem.lpv_model_aff:  return
     elif type(sys)          is model_augmentation.lpvsystem.lti_system:     return
+    elif type(sys).__base__ is model_augmentation.lpvsystem.lti_system:     return
     elif type(sys)          is model_augmentation.lpvsystem.lti_affine_system: return
     elif type(sys).__base__ is model_augmentation.lpvsystem.lti_affine_system: return
     elif type(sys).__base__ is model_augmentation.lpvsystem.general_nonlinear_system: return

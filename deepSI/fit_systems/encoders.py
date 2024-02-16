@@ -363,11 +363,31 @@ class SS_encoder_general_hf(SS_encoder_general):
 
     def loss(self, uhist, yhist, ufuture, yfuture, **Loss_kwargs):
         x = self.encoder(uhist, yhist) #initialize Nbatch number of states
+        x0 = x
         errors = []
         for y, u in zip(torch.transpose(yfuture,0,1), torch.transpose(ufuture,0,1)): #iterate over time
             yhat, x = self.hfn(x, u)
             errors.append(nn.functional.mse_loss(y, yhat)) #calculate error after taking n-steps
-        return torch.mean(torch.stack(errors))
+        mse_loss =  torch.mean(torch.stack(errors))
+        parm_regularization = 0
+        if hasattr(self.hfn, 'Pcorr_enab'):  # for augmentation
+            if self.hfn.Pcorr_enab:
+                parmsOrig = self.hfn.sys.P_orig
+                parmsTuned =  self.hfn.sys.P #self.hfn.P_orig * self.hfn.P_weight + self.hfn.P_bias
+                parmsDiff = parmsTuned - parmsOrig
+                nParms = parmsOrig.shape[0]
+                regularizationMx = self.hfn.regLambda*torch.min(torch.diag(1/parmsOrig**2), 1e6*torch.ones(nParms, nParms))
+                parm_regularization = parmsDiff.unsqueeze(dim=0)@regularizationMx@parmsDiff.unsqueeze(dim=1)
+                if hasattr(self.hfn, 'orthLambda') and self.hfn.orthLambda != 0:  # only implemented in sine example yet
+                    x = x0
+                    orthCost = []
+                    for y, u in zip(torch.transpose(yfuture, 0, 1), torch.transpose(ufuture, 0, 1)):
+                        orthCost.append(self.hfn.calculate_orthogonalisation(x, u))
+                        _, x = self.hfn(x, u)
+                    orthCost = torch.mean(torch.stack(orthCost))
+                else:
+                    orthCost = 0
+        return mse_loss + parm_regularization + orthCost
     
     def measure_act_multi(self,actions):
         actions = torch.tensor(np.array(actions), dtype=torch.float32) #(N,...)
@@ -384,6 +404,7 @@ class par_start_encoder(nn.Module):
 
     def forward(self,ids):
         return self.start_state[ids]
+
 
 class SS_par_start(SS_encoder): #this is not implemented in a nice manner, there might be bugs.
     """docstring for SS_par_start"""
