@@ -363,30 +363,40 @@ class SS_encoder_general_hf(SS_encoder_general):
 
     def loss(self, uhist, yhist, ufuture, yfuture, **Loss_kwargs):
         x = self.encoder(uhist, yhist) #initialize Nbatch number of states
-        x0 = x
         errors = []
+        if 'U1_orth' in Loss_kwargs:
+            U1_orth = Loss_kwargs.get('U1_orth')
+            X = Loss_kwargs.get('X')
+            U = Loss_kwargs.get('U')
+            U1_orth_exists = True
+        else:
+            U1_orth_exists = False
+        if hasattr(self.hfn, 'Pcorr_enab') and hasattr(self.hfn, 'orthLambda') and self.hfn.orthLambda != 0 and U1_orth_exists:
+            # check if orthogonalization is needed
+            calcOrth = True
+        else:
+            calcOrth = False
+            orthCost = 0
         for y, u in zip(torch.transpose(yfuture,0,1), torch.transpose(ufuture,0,1)): #iterate over time
             yhat, x = self.hfn(x, u)
             errors.append(nn.functional.mse_loss(y, yhat)) #calculate error after taking n-steps
         mse_loss =  torch.mean(torch.stack(errors))
+        if calcOrth:
+            batch_size = x.shape[0]  # TODO: should be given as an outside parameter
+            batch_strt = int(torch.rand(1) * (X.shape[0] - batch_size))
+            batch_end = batch_strt + batch_size
+            X_batch = X[batch_strt:batch_end, :]
+            U_batch = U[batch_strt:batch_end, :]
+            U1_batch = U1_orth[batch_strt*x.shape[1]:batch_end*x.shape[1], :]
+            orthCost = self.hfn.calculate_orthogonalisation(X_batch, U_batch, U1_batch)
         parm_regularization = 0
-        if hasattr(self.hfn, 'Pcorr_enab'):  # for augmentation
-            if self.hfn.Pcorr_enab:
-                parmsOrig = self.hfn.sys.P_orig
-                parmsTuned =  self.hfn.sys.P #self.hfn.P_orig * self.hfn.P_weight + self.hfn.P_bias
-                parmsDiff = parmsTuned - parmsOrig
-                nParms = parmsOrig.shape[0]
-                regularizationMx = self.hfn.regLambda*torch.min(torch.diag(1/parmsOrig**2), 1e6*torch.ones(nParms, nParms))
-                parm_regularization = parmsDiff.unsqueeze(dim=0)@regularizationMx@parmsDiff.unsqueeze(dim=1)
-                if hasattr(self.hfn, 'orthLambda') and self.hfn.orthLambda != 0:  # only implemented in sine example yet
-                    x = x0
-                    orthCost = []
-                    for y, u in zip(torch.transpose(yfuture, 0, 1), torch.transpose(ufuture, 0, 1)):
-                        orthCost.append(self.hfn.calculate_orthogonalisation(x, u))
-                        _, x = self.hfn(x, u)
-                    orthCost = torch.mean(torch.stack(orthCost))
-                else:
-                    orthCost = 0
+        if hasattr(self.hfn, 'Pcorr_enab') and self.hfn.Pcorr_enab:  # for augmentation
+            parmsOrig = self.hfn.sys.P_orig
+            parmsTuned =  self.hfn.sys.P #self.hfn.P_orig * self.hfn.P_weight + self.hfn.P_bias
+            parmsDiff = parmsTuned - parmsOrig
+            nParms = parmsOrig.shape[0]
+            regularizationMx = self.hfn.regLambda*torch.min(torch.diag(1/parmsOrig**2), 1e6*torch.ones(nParms, nParms))
+            parm_regularization = parmsDiff.unsqueeze(dim=0)@regularizationMx@parmsDiff.unsqueeze(dim=1)
         return mse_loss + parm_regularization + orthCost
     
     def measure_act_multi(self,actions):

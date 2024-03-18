@@ -230,6 +230,12 @@ class lti_system(nn.Module):
             x0 = torch.zeros(self.Nx)
         return hidden_apply_experiment(self, data, x0, x0_meas)
 
+    def calculate_orth_matrix(self, x, u):
+        # in:           | out:
+        #  - x (Nd, Nx) |  - F(x,u) (Nd*Nx, Np)  assumed LIP model: x+ = F(x,u)*theta
+        #  - u (Nd, Nu) |
+        raise NotImplementedError('Tha matrix containing the basis functions should be implemented in child!')
+
 class lti_affine_system(lti_system):
     def __init__(self, A, B, C, D, f0, h0, Ts=-1):
         super(lti_affine_system, self).__init__(A=A, B=B, C=C, D=D, Ts=-1)
@@ -259,8 +265,9 @@ class lti_affine_system(lti_system):
         Du = torch.einsum(einsumequation, self.D, u)  # (Nd, Nx, Nu)*(Nd, Nu)->(Nd, Nx)
         return Cx + Du + self.h0
 
-class general_nonlinear_system:
+class general_nonlinear_system(nn.Module):
     def __init__(self, nu, nx, ny, Ts=-1):
+        super(general_nonlinear_system, self).__init__()
         # This system must be able to process the inputs and outputs for the subspace encoder,
         # hence: shape({x,u,y,p}) = (Nd,{nx,nu,ny,np})
         self.Nu = nu

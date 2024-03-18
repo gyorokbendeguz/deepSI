@@ -26,6 +26,7 @@ def simple_res_net_2_LFR(net):
             bz  = torch.cat((bz, seq[2 * i].bias.data))
     return Dzw, Dzu, Dyw, Dyu, bz, by
 
+
 # Allowed systems:
 def verifySystemType(sys):
     if   type(sys).__base__ is model_augmentation.lpvsystem.lpv_model_grid: return
@@ -71,3 +72,15 @@ def assign_param(A_old, A_new, nm):
         return A_new.data
     else:
         return A_old.data
+
+
+# Calculating the SVD of the training data-set for orthogonalization-based regularization
+def calculate_orthogonalisation(sys, train_data):
+    # in:               | out:
+    #  - x (Nd, Nx)     |  - cost
+    #  - u (Nd, Nu)     |
+
+    sys_data = sys.apply_experiment(train_data, x0_meas=True)
+    Matrix = sys.calculate_orth_matrix(sys_data.x, sys_data.u)
+    U1, _, _ = torch.linalg.svd(Matrix, full_matrices=False)
+    return U1, torch.tensor(sys_data.x, dtype=torch.float), torch.tensor(sys_data.u, dtype=torch.float)
