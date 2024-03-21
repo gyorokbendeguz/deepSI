@@ -638,6 +638,9 @@ class System_data_list(System_data):
     def y(self): #concatenate or list of lists
         return np.concatenate([sd.y for sd in self.sdl],axis=0)
     @property
+    def x(self): #concatenate or list of lists
+        return np.concatenate([sd.x for sd in self.sdl],axis=0)
+    @property
     def u(self): #concatenate or list of lists
         return np.concatenate([sd.u for sd in self.sdl],axis=0)    
     @property
