@@ -1,3 +1,5 @@
+import warnings
+
 import deepSI
 import numpy as np
 import torch
@@ -75,12 +77,66 @@ def assign_param(A_old, A_new, nm):
 
 
 # Calculating the SVD of the training data-set for orthogonalization-based regularization
-def calculate_orthogonalisation(sys, train_data):
+def calculate_orthogonalisation(sys, train_data, x_meas=False, mini_batch_size=None):
     # in:               | out:
     #  - x (Nd, Nx)     |  - cost
     #  - u (Nd, Nu)     |
 
-    sys_data = sys.apply_experiment(train_data, x0_meas=True)
-    Matrix = sys.calculate_orth_matrix(sys_data.x, sys_data.u)
+    if x_meas: # when y=x
+        x = train_data.y
+        u = train_data.u
+    else:
+        sys_data = sys.apply_experiment(train_data)
+        x = sys_data.x
+        u = sys_data.u
+
+    if mini_batch_size is not None:
+        batch_strt = int(torch.rand(1) * (x.shape[0] - mini_batch_size))
+        batch_end = batch_strt + mini_batch_size
+        x = x[batch_strt:batch_end, :]
+        u = u[batch_strt:batch_end, :]
+    Matrix = sys.calculate_orth_matrix(x, u)
     U1, _, _ = torch.linalg.svd(Matrix, full_matrices=False)
-    return U1, torch.tensor(sys_data.x, dtype=torch.float), torch.tensor(sys_data.u, dtype=torch.float)
+    return U1, torch.tensor(x, dtype=torch.float), torch.tensor(u, dtype=torch.float)
+
+
+def initialize_augmentation_net(network, augm_type):
+    if augm_type in 'additive':
+        init_additive_augmentation_net(network)
+    elif augm_type in 'multiplicative':
+        init_multiplicative_augmentation_net(network)
+
+
+# Function for initializing neural networks in additive structure
+def init_additive_augmentation_net(network):
+    if type(network) is deepSI.utils.torch_nets.simple_res_net:
+        # If the network is residual neur. net. (has linear part)
+        network.net_lin.weight.data.fill_(0.0)
+        if network.net_non_lin is not None:  # has nonlinear part
+            network.net_non_lin.net[-1].weight.data.fill_(0.0)
+            network.net_non_lin.net[-1].bias.data.fill_(0.0)
+        else: # if only linear part is present, then it has bias value
+            network.net_lin.bias.data.fill_(0.0)
+    elif type(network) is deepSI.utils.torch_nets.feed_forward_nn:
+        # for simple feedforward nets
+        network.net[-1].weight.data.fill_(0.0)
+        network.net[-1].bias.data.fill_(0.0)
+    else:
+        warnings.warn("Neural network type should be either 'deepSI.utils.torch_nets.simple_res_net'"
+                      "or 'deepSI.utils.torch_nets.feed_forward_nn' for accurate initialization.")
+
+def init_multiplicative_augmentation_net(network):
+    if type(network) is deepSI.utils.torch_nets.simple_res_net:
+        # If the network is residual neur. net. (has linear part)
+        network.net_lin.weight.data.fill_(0.0)
+        for i in range(network.n_out):
+            idx1 = i
+            idx2 = i + network.n_in - network.n_out
+            network.net_lin.weight.data[idx1, idx2].fill_(1.0)
+        if network.net_non_lin is not None:  # has nonlinear part
+            network.net_non_lin.net[-1].weight.data.fill_(0.0)
+            network.net_non_lin.net[-1].bias.data.fill_(0.0)
+        else:  # if only linear layer is present, then it has a bias value
+            network.net_lin.bias.data.fill_(0.0)
+    else:
+        warnings.warn("Neural network type should be 'deepSI.utils.torch_nets.simple_res_net' for accurate initialization.")

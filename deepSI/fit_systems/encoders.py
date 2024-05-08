@@ -382,13 +382,7 @@ class SS_encoder_general_hf(SS_encoder_general):
             errors.append(nn.functional.mse_loss(y, yhat)) #calculate error after taking n-steps
         mse_loss =  torch.mean(torch.stack(errors))
         if calcOrth:
-            batch_size = x.shape[0]  # TODO: should be given as an outside parameter
-            batch_strt = int(torch.rand(1) * (X.shape[0] - batch_size))
-            batch_end = batch_strt + batch_size
-            X_batch = X[batch_strt:batch_end, :]
-            U_batch = U[batch_strt:batch_end, :]
-            U1_batch = U1_orth[batch_strt*x.shape[1]:batch_end*x.shape[1], :]
-            orthCost = self.hfn.calculate_orthogonalisation(X_batch, U_batch, U1_batch)
+            orthCost = self.hfn.calculate_orthogonalisation(X, U, U1_orth)
         parm_regularization = 0
         if hasattr(self.hfn, 'Pcorr_enab') and self.hfn.Pcorr_enab:  # for augmentation
             parmsOrig = self.hfn.sys.P_orig
@@ -397,7 +391,7 @@ class SS_encoder_general_hf(SS_encoder_general):
             nParms = parmsOrig.shape[0]
             regularizationMx = self.hfn.regLambda*torch.min(torch.diag(1/parmsOrig**2), 1e6*torch.ones(nParms, nParms))
             parm_regularization = parmsDiff.unsqueeze(dim=0)@regularizationMx@parmsDiff.unsqueeze(dim=1)
-        return mse_loss + parm_regularization + orthCost
+        return mse_loss + (parm_regularization + orthCost)/self.N_batch_updates_per_epoch
     
     def measure_act_multi(self,actions):
         actions = torch.tensor(np.array(actions), dtype=torch.float32) #(N,...)

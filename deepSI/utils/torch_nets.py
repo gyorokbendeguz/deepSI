@@ -172,12 +172,13 @@ class simple_res_net(nn.Module):
     def __init__(self, n_in=6, n_out=5, n_nodes_per_layer=64, n_hidden_layers=2, activation=nn.Tanh):
         #linear + non-linear part 
         super(simple_res_net,self).__init__()
-        self.net_lin = nn.Linear(n_in,n_out)
         self.n_in = n_in
         self.n_out = n_out
         if n_hidden_layers>0:
+            self.net_lin = nn.Linear(n_in, n_out, bias=False)
             self.net_non_lin = feed_forward_nn(n_in, n_out, n_nodes_per_layer=n_nodes_per_layer, n_hidden_layers=n_hidden_layers,activation=activation)
         else:
+            self.net_lin = nn.Linear(n_in, n_out)
             self.net_non_lin = None
 
     def forward(self,x):

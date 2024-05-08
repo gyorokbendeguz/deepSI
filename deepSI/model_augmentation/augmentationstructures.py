@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 from deepSI import model_augmentation
-from deepSI.model_augmentation.utils import verifySystemType, verifyNetType, RK4_step, assign_param
+from deepSI.model_augmentation.utils import verifySystemType, verifyNetType, RK4_step, assign_param, initialize_augmentation_net
 from deepSI.model_augmentation.augmentationEncoders import default_encoder_net, state_measure_encoder, dynamic_state_meas_encoder
 import warnings
 
@@ -11,13 +11,17 @@ import warnings
 ####################         DEFAULT/GENERIC FUNCTIONS         ####################
 ###################################################################################
 
-def verifyAugmentationStructure(augmentation_struct, known_sys, neur_net):
+def verifyAugmentationStructure(augmentation_struct, known_sys, neur_net, nx_hidden=0):
     # Verify if the augmentation structure is valid and calculate the encoder state depending on static/dynamic augmentation.
-    if augmentation_struct is SSE_StaticAugmentation: static = True
-    elif augmentation_struct is SSE_AdditiveAugmentation: static = True
-    elif augmentation_struct is SSE_DynamicAugmentation: static = False
-    elif augmentation_struct is SSE_AdditiveDynAugmentation: static = False
+    if augmentation_struct is SSE_StaticAugmentation: static = True; augm = 'LFR'
+    elif augmentation_struct is SSE_DynamicAugmentation: static = False; augm = 'LFR'
+    elif augmentation_struct is SSE_AdditiveAugmentation: static = True; augm = 'additive'
+    elif augmentation_struct is SSE_AdditiveDynAugmentation: static = False; augm = 'additive'
+    elif augmentation_struct is SSE_MultiplicativeAugmentation: static = True; augm = 'multiplicative'
+    elif augmentation_struct is SSE_MultiplicativeDynAugmentation: static = False; augm = 'multiplicative'
     else: raise ValueError("'augmentation_structure' must be one of the types defined in 'model_augmentation.augmentationstructures'")
+
+    initialize_augmentation_net(network=neur_net, augm_type=augm)
 
     if static:
         # Only learn the system states for static augmentation
@@ -25,37 +29,14 @@ def verifyAugmentationStructure(augmentation_struct, known_sys, neur_net):
     else:
         # Learn the state of the augmented model as well for dynamic augmentation
         nx_system = known_sys.Nx
-        nx_hidden = neur_net.n_state
         nx_encoder = nx_system + nx_hidden
     return nx_encoder
 
 
-class default_state_net(nn.Module):
-    def __init__(self, nu, nx, augmentation_params):
-        super(default_state_net, self).__init__()
-        self.MApar = augmentation_params
-
-    def forward(self, x, u):
-        # in:                | out:
-        #  - x (Nd, Nx)      |  - x+ (Nd, Nx)
-        #  - u (Nd, Nu + np) |
-        return self.MApar.f_h(x,u)[0] # Select f(x,u) function
-
-class default_output_net(nn.Module):
-    def __init__(self, nu, nx, ny, augmentation_params):
-        super(default_output_net, self).__init__()
-        self.MApar = augmentation_params
-
-    def forward(self, x, u):
-        # in:                | out:
-        #  - x (Nd, Nx)      |  - y (Nd, Ny)
-        #  - u (Nd, Nu + np) |
-        return self.MApar.f_h(x,u)[1] # Select h(x,u) function
-
 def get_dynamic_augment_fitsys(augmentation_structure, known_system, hidden_state, neur_net, aug_kwargs={}, e_net=default_encoder_net,
                                y_lag_encoder=None, u_lag_encoder=None, enet_kwargs={}, na_right=0, nb_right=0,
                                regLambda=0.01):
-    nx_encoder = verifyAugmentationStructure(augmentation_structure, known_system, neur_net)
+    nx_encoder = verifyAugmentationStructure(augmentation_structure, known_system, neur_net, hidden_state)
     if y_lag_encoder is None: y_lag_encoder = nx_encoder + 1
     if u_lag_encoder is None: u_lag_encoder = nx_encoder + 1
     if e_net is None:
@@ -73,8 +54,7 @@ def get_dynamic_augment_fitsys(augmentation_structure, known_system, hidden_stat
 
 def get_augmented_fitsys(augmentation_structure, known_system, wnet, aug_kwargs={}, e_net=default_encoder_net,
                          y_lag_encoder=None, u_lag_encoder=None, enet_kwargs={}, na_right=0, nb_right=0,
-                         regLambda=0.01, orthLambda=0):
-
+                         regLambda=0.01, orthLambda=0, input_dependency=True):
     nx_encoder = verifyAugmentationStructure(augmentation_structure, known_system, wnet)
     if y_lag_encoder is None: y_lag_encoder = nx_encoder + 1
     if u_lag_encoder is None: u_lag_encoder = nx_encoder + 1
@@ -83,11 +63,11 @@ def get_augmented_fitsys(augmentation_structure, known_system, wnet, aug_kwargs=
         u_lag_encoder = 1
         na_right = 1
         e_net = state_measure_encoder
-
     return deepSI.fit_systems.SS_encoder_general_hf(feedthrough=True, nx=nx_encoder, na=y_lag_encoder, nb=u_lag_encoder,
                                                     e_net=e_net, e_net_kwargs=dict(**enet_kwargs), hf_net=augmentation_structure,
                                                     hf_net_kwargs=dict(known_system=known_system, wnet=wnet, regLambda=regLambda,
-                                                                   orthLambda=orthLambda, **aug_kwargs),
+                                                                    orthLambda=orthLambda, input_dependency=input_dependency,
+                                                                    **aug_kwargs),
                                                     na_right=na_right, nb_right=nb_right
                                                     )
 
@@ -132,7 +112,8 @@ class SSE_Augmentation(nn.Module):  # TODO: Make generic class
 
 
 class SSE_StaticAugmentation(nn.Module):
-    def __init__(self, nx, nu, ny, known_system, wnet, initial_scaling_factor=1e-3, Dzw_is_zero=True, feedthrough=True):
+    def __init__(self, nx, nu, ny, known_system, wnet, initial_scaling_factor=1e-3, Dzw_is_zero=True, feedthrough=True,
+                 regLambda=0, **kwargs):
         super(SSE_StaticAugmentation, self).__init__()
         # First verify if we have the correct system type and augmentationparameters
         verifySystemType(known_system)
@@ -145,11 +126,19 @@ class SSE_StaticAugmentation(nn.Module):
         self.Ny = self.sys.Ny
         self.Nz = self.net.n_in
         self.Nw = self.net.n_out
-        self.Bw = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nx, self.Nw))
+        if hasattr(known_system, 'parm_corr_enab'):
+            self.Pcorr_enab = known_system.parm_corr_enab
+        else:
+            self.Pcorr_enab = False
+        if self.Pcorr_enab:
+            self.regLambda = regLambda
+        #self.Bw = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nx, self.Nw))
+        self.Bw = nn.Parameter(data=torch.zeros(self.Nx, self.Nw))
         self.Cz = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nz, self.Nx))
         self.Dzw = None if Dzw_is_zero else nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nz, self.Nw))
         self.Dzu = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nz, self.Nu))
-        self.Dyw = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Ny, self.Nw))
+        #self.Dyw = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Ny, self.Nw))
+        self.Dyw = nn.Parameter(data=torch.zeros(self.Ny, self.Nw))
 
     def initialize_parameters(self, Bw = None, Cz = None, Dzw = None, Dzu = None, Dyw = None):
         self.Bw.data = assign_param(self.Bw, Bw, 'Bw')
@@ -181,6 +170,8 @@ class SSE_StaticAugmentation(nn.Module):
         # in:           | out:
         #  - x (Nd, Nx) |  - y  (Nd, Ny)
         #  - u (Nd, Nu) |  - x+ (Nd, Nx)
+        if u.ndim == 1:
+            u = torch.unsqueeze(u, dim=0)
         # compute network contribution
         z = self.compute_z(x, u)
         w = self.net(z)
@@ -193,20 +184,33 @@ class SSE_StaticAugmentation(nn.Module):
 ##############                DYNAMIC LFR AUGMENTATION               ##############
 ###################################################################################
 class SSE_DynamicAugmentation(nn.Module):
-    def __init__(self, nx, nu, ny, known_system, wnet, initial_scaling_factor=1e-3, Dzw_is_zero=True, feedthrough=True):
+    def __init__(self, nx, nu, ny, nx_h, known_system, wnet, initial_scaling_factor=1e-3, Dzw_is_zero=True, feedthrough=True,
+                 regLambda=0):
         super(SSE_DynamicAugmentation, self).__init__()
         # First verify if we have the correct system type and augmentationparameters
         verifySystemType(known_system)
-        verifyNetType(wnet, 'dynamic')
+        # verifyNetType(wnet, 'dynamic')
         # Save parameters
         self.sys = known_system
+        self.Nxh = nx_h
         self.net = wnet
+        if type(self.net) is deepSI.utils.contracting_REN:
+            self.nettype = 'cREN'
+            self.Nz = self.net.n_in
+            self.Nw = self.net.n_out
+        else:
+            self.nettype = 'Feedforward'
+            self.Nz = self.net.n_in - self.Nxh
+            self.Nw = self.net.n_out - self.Nxh
         self.Nu  = self.sys.Nu
         self.Nx  = self.sys.Nx
         self.Ny  = self.sys.Ny
-        self.Nz  = self.net.n_in
-        self.Nw  = self.net.n_out
-        self.Nxh = self.net.n_state
+        if hasattr(known_system, 'parm_corr_enab'):
+            self.Pcorr_enab = known_system.parm_corr_enab
+        else:
+            self.Pcorr_enab = False
+        if self.Pcorr_enab:
+            self.regLambda = regLambda
         self.Bw  = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nx, self.Nw))
         self.Cz  = nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nz, self.Nx))
         self.Dzw = None if Dzw_is_zero else nn.Parameter(data=initial_scaling_factor * torch.rand(self.Nz, self.Nw))
@@ -240,6 +244,21 @@ class SSE_DynamicAugmentation(nn.Module):
         #  - w (Nd, Nw)      |  - Bw*w (Nd, Nx)
         return torch.einsum('ij, bj -> bi', self.Bw, w)  # (Nx, Nw)*(Nd, Nw)->(Nd, Nx)
 
+    def compute_ANN(self, x_hidden, z):
+        # in:                   | out:
+        #  - x_hidden (Nd, Nxh) |  - x_hidden_plus (Nd, Nz)
+        #  - z (Nd, Nx)         |  - w (nd, Nw)
+        if self.nettype == 'cREN':
+            # for contracting REN networks
+            x_hidden_plus, w = self.net(hidden_state=x_learn, u=z)  # u_net = z_model
+        else:
+            # simple feedforward or residual net., etc.
+            net_in = torch.cat([x_hidden.view(x_hidden.shape[0],-1), z.view(z.shape[0],-1)],axis=1)
+            net_out = self.net(net_in)
+            x_hidden_plus = net_out[:, :self.Nxh]
+            w = net_out[:, -self.Nw:]
+        return x_hidden_plus, w
+
     def forward(self,x, u):
         # in:                 | out:
         #  - x (Nd, Nx + Nxh) |  - x+ (Nd, Nx + Nxh)
@@ -254,10 +273,13 @@ class SSE_DynamicAugmentation(nn.Module):
         else:
             x_known = x[:, :self.Nx]
             x_learn = x[:, -self.Nxh:]
+        if u.ndim == 1:
+            u = torch.unsqueeze(u, dim=0)
         # compute the input for the network
         z = self.compute_z(x=x_known, w=None, u=u)  # z = Cz x + Dzw w + Dzu u  --> Dzw = 0
         # calculate w from NN and update hidden state
-        x_learn_plus, w = self.net(hidden_state=x_learn, u=z)  # u_net = z_model
+        #x_learn_plus, w = self.net(hidden_state=x_learn, u=z)  # u_net = z_model
+        x_learn_plus, w = self.compute_ANN(x_hidden=x_learn, z=z)
         x_known_plus = self.sys.f(x_known, u) + self.compute_xnet_contribution(w)
         y_k          = self.sys.h(x_known, u) + self.compute_ynet_contribution(w)
         x_plus = torch.cat((x_known_plus,x_learn_plus), dim=x.ndim-1)
@@ -282,7 +304,7 @@ class SSE_AdditiveAugmentation(nn.Module):
         regLambda - regularization coefficient for physical parameters in f
         orthLambda - orthogonalization coefficient that penalizes the cost fun. for F, which ouput is in the subspace of f
     '''
-    def __init__(self, nx, nu, ny, known_system, wnet, regLambda=0, orthLambda=0, feedthrough=True):
+    def __init__(self, nx, nu, ny, known_system, wnet, regLambda=0, orthLambda=0, feedthrough=True, input_dependency=True):
         super(SSE_AdditiveAugmentation, self).__init__()
         # First verify if we have the correct system type and augmentation parameters
         verifySystemType(known_system)
@@ -293,6 +315,7 @@ class SSE_AdditiveAugmentation(nn.Module):
         self.Nu = known_system.Nu
         self.Nx = known_system.Nx
         self.Ny = known_system.Ny
+        self.input_dependency = input_dependency
         if hasattr(known_system, 'parm_corr_enab'):
             self.Pcorr_enab = known_system.parm_corr_enab
         else:
@@ -306,9 +329,10 @@ class SSE_AdditiveAugmentation(nn.Module):
         #  - x (Nd, Nx)     |  - x+ (Nd, Nx)
         #  - u (Nd, Nu)     |
 
-        if u.ndim == 1:
-            u = torch.unsqueeze(u, dim=0)
-        xnet_input = torch.cat((x, u), dim=1)
+        if self.input_dependency:
+            xnet_input = torch.cat((x.view(x.shape[0],-1), u.view(u.shape[0],-1)), dim=1)
+        else:
+            xnet_input = x
         return self.xnet(xnet_input)
 
     def forward(self, x, u):
@@ -365,16 +389,16 @@ class SSE_AdditiveDynAugmentation(SSE_AdditiveAugmentation):
 
     def calculate_orthogonalisation(self, x, u, U1):
         # Orthogonalization-based regularization is not supported for dynamic augmentation
-        # self.orthLambda = 0, but for safety reasons
+        # self.orthLambda = 0, but for safety reasons this function is implemented as dummy
         return 0
 
 
 ###################################################################################
 ##############              MULTIPLICATIVE AUGMENTATION              ##############
 ###################################################################################
-class MultiplicativeAugmentation(nn.Module):
-    def __init__(self, nx, nu, ny, known_system, wnet, regLambda=0, feedthrough=True):
-        super(MultiplicativeAugmentation, self).__init__()
+class SSE_MultiplicativeAugmentation(nn.Module):
+    def __init__(self, nx, nu, ny, known_system, wnet, regLambda=0, feedthrough=True, **kwargs):
+        super(SSE_MultiplicativeAugmentation, self).__init__()
         # First verify if we have the correct system type and augmentationparameters
         verifySystemType(known_system)
         verifyNetType(wnet, 'static')  # this may cause instabilities, we have to check later ...
@@ -397,9 +421,7 @@ class MultiplicativeAugmentation(nn.Module):
         #  - u (Nd, Nu)     |
         #  - x_fp (Nd, Nx)  |
 
-        if u.ndim == 1:
-            u = torch.unsqueeze(u, dim=0)
-        xnet_input = torch.cat((x, u, x_fp), dim=1)
+        xnet_input = torch.cat((x.view(x.shape[0],-1), u.view(u.shape[0],-1), x_fp.view(x_fp.shape[0],-1)), dim=1)
         return  self.xnet(xnet_input)
 
     def forward(self, x, u):
@@ -416,9 +438,9 @@ class MultiplicativeAugmentation(nn.Module):
 ###################################################################################
 ##############          DYNAMIC MULTIPLICATIVE AUGMENTATION          ##############
 ###################################################################################
-class MultiplicativeDynAugmentation(nn.Module):
+class SSE_MultiplicativeDynAugmentation(nn.Module):
     def __init__(self, nx, nu, ny, known_system, wnet, regLambda=0, feedthrough=True):
-        super(MultiplicativeAugmentation, self).__init__()
+        super(SSE_MultiplicativeDynAugmentation, self).__init__()
         # First verify if we have the correct system type and augmentationparameters
         verifySystemType(known_system)
         verifyNetType(wnet, 'static')  # this may cause instabilities, we have to chech later ...
@@ -441,9 +463,7 @@ class MultiplicativeDynAugmentation(nn.Module):
         #  - u (Nd, Nu)     |
         #  - x_fp (Nd, Nx)  |
 
-        if u.ndim == 1:
-            u = torch.unsqueeze(u, dim=0)
-        xnet_input = torch.cat((x, u, x_fp), dim=1)
+        xnet_input = torch.cat((x.view(x.shape[0],-1), u.view(u.shape[0],-1), x_fp.view(x_fp.shape[0],-1)), dim=1)
         return  self.xnet(xnet_input)
 
     def forward(self, x, u):

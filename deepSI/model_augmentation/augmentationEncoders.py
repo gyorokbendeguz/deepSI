@@ -51,7 +51,6 @@ class dynamic_state_meas_encoder(nn.Module):  # y[k]=x[k] cases with hidden stat
         #  - u_past (Nd, nb+nb_right, Nu)   |  - x0 (Nd, Nx_meas+Nx_hidden)
         #  - y_past (Nd, na+na_right, Ny)   |
         x_meas = ypast[:,-1,:]
-        # ypast_mod = ypast[:,:-1,:]  #ToDo: maybe it is needed or not
         net_in = torch.cat([upast.view(upast.shape[0],-1),ypast.view(ypast.shape[0],-1)],axis=1)
         x_hidden = self.net(net_in)
         return torch.hstack((x_meas, x_hidden))
@@ -76,13 +75,13 @@ class lti_initialized_encoder(nn.Module):
     '''
     def __init__(self, nb, nu, na, ny, nx, known_sys, n_nodes_per_layer=64, n_hidden_layers=2, activation=nn.Tanh, noise_handling=True):
         super(lti_initialized_encoder, self).__init__()
-        from deepSI.utils import simple_res_net
+        from deepSI.utils import feed_forward_nn
         self.nu = tuple() if nu is None else ((nu,) if isinstance(nu, int) else nu)
         self.ny = tuple() if ny is None else ((ny,) if isinstance(ny, int) else ny)
         self.nx = nx
-        self.net = simple_res_net(n_in=nb * np.prod(self.nu, dtype=int) + na * np.prod(self.ny, dtype=int), n_out=nx,
-                                  n_nodes_per_layer=n_nodes_per_layer, n_hidden_layers=n_hidden_layers,
-                                  activation=activation)
+        self.net = feed_forward_nn(n_in=nb * np.prod(self.nu, dtype=int) + na * np.prod(self.ny, dtype=int), n_out=nx,
+                                   n_nodes_per_layer=n_nodes_per_layer, n_hidden_layers=n_hidden_layers,
+                                   activation=activation)
         self.initialize_encoder_net(self.net)  # set last layer weights + biases to zero
         # declare matrices as None, then set the values later in calculate_matrices function
         self.n = self.nx- 1  # for LTI models n=nx-1
@@ -104,14 +103,10 @@ class lti_initialized_encoder(nn.Module):
         self.calculate_matrices(known_sys)
 
     def initialize_encoder_net(self, network):
-        network.net_lin.weight.data.fill_(0.0)
-        network.net_lin.bias.data.fill_(0.0)
-        if network.net_non_lin is not None:
-            network.net_non_lin.net[-1].weight.data.fill_(0.0)
-            network.net_non_lin.net[-1].bias.data.fill_(0.0)
+        network.net[-1].weight.data.fill_(0.0)
+        network.net[-1].bias.data.fill_(0.0)
 
     def calculate_matrices(self, lti_sys):
-
         if self.noise:
             K = self.K.clone()
             A = lti_sys.A.detach() - K @ lti_sys.C.detach()
@@ -156,7 +151,6 @@ class lti_initialized_encoder(nn.Module):
             self.lambda_mx = lambda_val
         return
 
-
     def forward(self, upast, ypast):
         # in:                               | out:
         #  - u_past (Nd, nb+nb_right, Nu)   |  - x0 (Nd, Nx)
@@ -185,6 +179,17 @@ class lti_initialized_encoder(nn.Module):
 
 
 class lti_initialized_parmtuning_encoder(lti_initialized_encoder):
+    '''
+    Same as functuality as lti_initialized_encoder, but the resulting matrices from the LTI-based reconstruction are
+    also tuned as network parameters.
+
+    Input parameters:
+        na, nb - output lag, input lag
+        nu, nx, ny - input dimension, state dimension, output dimension
+        known_sys - LTI model
+        n_nodes_per_layer, n_hidden_layers, activation - neural network hyperparameters
+        noise_handling - bool: use noise structure or not
+    '''
     def __init__(self, nb, nu, na, ny, nx, known_sys, n_nodes_per_layer=64, n_hidden_layers=2, activation=nn.Tanh, noise_handling=True):
         super(lti_initialized_parmtuning_encoder, self).__init__(nb=nb, nu=nu, na=na, ny=ny, nx=nx, known_sys=known_sys,
                                                                  n_nodes_per_layer=n_nodes_per_layer, n_hidden_layers=n_hidden_layers,

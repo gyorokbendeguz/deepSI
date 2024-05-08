@@ -321,9 +321,10 @@ class System_torch(System_fittable):
         Loss_acc_val, N_batch_acc_val, val_counter, best_epoch, batch_id_start = 0, 0, 0, 0, self.batch_counter #to print the frequency of the validation step.
         N_training_samples = len(data_train) if isinstance(data_train, Dataset) else len(data_train[0])
         batch_size = min(batch_size, N_training_samples)
-        N_batch_updates_per_epoch = N_training_samples//batch_size
+        # PATCH: included N_batch_updates_per seconds into attributes, for the regularization methods to reach
+        self.N_batch_updates_per_epoch = N_training_samples//batch_size
         if verbose>0: 
-            print(f'N_training_samples = {N_training_samples}, batch_size = {batch_size}, N_batch_updates_per_epoch = {N_batch_updates_per_epoch}')
+            print(f'N_training_samples = {N_training_samples}, batch_size = {batch_size}, N_batch_updates_per_epoch = {self.N_batch_updates_per_epoch}')
         
         ### convert to dataset ###
         if isinstance(data_train, Dataset):
@@ -383,7 +384,7 @@ class System_torch(System_fittable):
                     Loss_acc_epoch += training_loss
                     N_batch_acc_val += 1
                     self.batch_counter += 1
-                    self.epoch_counter += 1/N_batch_updates_per_epoch
+                    self.epoch_counter += 1/self.N_batch_updates_per_epoch
 
                     t.tic('val')
                     if concurrent_val and self.remote_recv(): ####### validation #######
@@ -394,7 +395,7 @@ class System_torch(System_fittable):
                 t.toc('data get')
 
                 ########## end of epoch clean up ##########
-                train_loss_epoch = Loss_acc_epoch/N_batch_updates_per_epoch
+                train_loss_epoch = Loss_acc_epoch/self.N_batch_updates_per_epoch
                 if np.isnan(train_loss_epoch):
                     if verbose>0: print(f'&&&&&&&&&&&&& Encountered a NaN value in the training loss at epoch {epoch}, breaking from loop &&&&&&&&&&')
                     break
