@@ -134,11 +134,13 @@ class lti_initialized_encoder(nn.Module):
                 Lambda = torch.hstack((Lambda, C @ torch.matrix_power(A, i) @ K))
                 lambda_val = torch.hstack((lambda_val, torch.matrix_power(A, i) @ K))
         for i in range(n):
-            Gamma_row = torch.zeros((lti_sys.Ny, lti_sys.Nu * (i + 1)))
+            #Gamma_row = torch.zeros((lti_sys.Ny, lti_sys.Nu * (i + 1)))
+            Gamma_row = torch.zeros_like(D)
             Gamma_row = torch.hstack((Gamma_row, Gamma[-lti_sys.Ny:, :-lti_sys.Nu]))
             Gamma = torch.vstack((Gamma, Gamma_row))
             if self.noise:
-                Lambda_row = torch.zeros((lti_sys.Ny, lti_sys.Ny * (i + 1)))
+                #Lambda_row = torch.zeros((lti_sys.Ny, lti_sys.Ny * (i + 1)))
+                Lambda_row = torch.zeros_like(C @ K)
                 Lambda_row = torch.hstack((Lambda_row, Lambda[-lti_sys.Ny:, :-lti_sys.Ny]))
                 Lambda = torch.vstack((Lambda, Lambda_row))
 
